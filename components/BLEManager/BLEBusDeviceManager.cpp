@@ -78,14 +78,21 @@ void BLEBusDeviceManager::getDeviceAddresses(std::vector<BusElemAddrType>& addre
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// @brief Get queued device data in JSON format
 /// @return JSON doc
-String BLEBusDeviceManager::getQueuedDeviceDataJson() const
+String BLEBusDeviceManager::getQueuedDeviceDataJson(uint32_t maxResponsesToReturn,
+        uint32_t* pRemaining) const
 {
     // Return string
     String jsonStr;
+    uint32_t remaining = 0;
+    uint32_t added = 0;
 
     // Get semaphore
     if (xSemaphoreTake(_accessMutex, pdMS_TO_TICKS(5)) != pdTRUE)
+    {
+        if (pRemaining)
+            *pRemaining = 0;
         return "{}";
+    }
 
     // Iterate list of devices
     for (const BLEBusDeviceState& devState : _bleBusDeviceStates)
@@ -93,6 +100,12 @@ String BLEBusDeviceManager::getQueuedDeviceDataJson() const
         // Get poll response JSON
         if (devState.lastDataReceived.size() > 0)
         {
+            if ((maxResponsesToReturn != 0) && (added >= maxResponsesToReturn))
+            {
+                remaining++;
+                continue;
+            }
+
             String pollResponseJson = deviceStatusToJson(devState.busElemAddr, true, _deviceTypeIndex, 
                             devState.lastDataReceived, devState.lastDataReceived.size());
             if (pollResponseJson.length() > 0)
@@ -102,11 +115,15 @@ String BLEBusDeviceManager::getQueuedDeviceDataJson() const
 
             // Clear data - const cast
             const_cast<BLEBusDeviceState&>(devState).lastDataReceived.clear();
+            added++;
         }
     }
 
     // Return semaphore
     xSemaphoreGive(_accessMutex);
+
+    if (pRemaining)
+        *pRemaining = remaining;
 
     // Debug
 #ifdef DEBUG_GET_DEVICE_DATA_JSON
@@ -120,14 +137,21 @@ String BLEBusDeviceManager::getQueuedDeviceDataJson() const
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// @brief Get queued device data in binary format
 /// @return Binary data vector
-std::vector<uint8_t> BLEBusDeviceManager::getQueuedDeviceDataBinary(uint32_t connMode) const
+std::vector<uint8_t> BLEBusDeviceManager::getQueuedDeviceDataBinary(uint32_t connMode,
+        uint32_t maxResponsesToReturn, uint32_t* pRemaining) const
 {
     // Binary data
     std::vector<uint8_t> binaryData;
+    uint32_t remaining = 0;
+    uint32_t added = 0;
 
     // Get semaphore
     if (xSemaphoreTake(_accessMutex, pdMS_TO_TICKS(5)) != pdTRUE)
+    {
+        if (pRemaining)
+            *pRemaining = 0;
         return binaryData;
+    }
 
     // Iterate list of devices
     for (const BLEBusDeviceState& devState : _bleBusDeviceStates)
@@ -135,16 +159,26 @@ std::vector<uint8_t> BLEBusDeviceManager::getQueuedDeviceDataBinary(uint32_t con
         // Get poll response JSON
         if (devState.lastDataReceived.size() > 0)
         {
+            if ((maxResponsesToReturn != 0) && (added >= maxResponsesToReturn))
+            {
+                remaining++;
+                continue;
+            }
+
             // Generate binary device message
             RaftDevice::genBinaryDataMsg(binaryData, connMode, devState.busElemAddr, _deviceTypeIndex, true, devState.lastDataReceived);
 
             // Clear data - const cast
             const_cast<BLEBusDeviceState&>(devState).lastDataReceived.clear();
+            added++;
         }
     }
 
     // Return semaphore
     xSemaphoreGive(_accessMutex);
+
+    if (pRemaining)
+        *pRemaining = remaining;
 
     // Debug
 #ifdef DEBUG_GET_DEVICE_DATA_BINARY
@@ -329,4 +363,3 @@ String BLEBusDeviceManager::deviceStatusToJson(BusElemAddrType address, bool isO
 #endif
     return devJson;
 }
-

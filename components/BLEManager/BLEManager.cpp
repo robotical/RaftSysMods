@@ -54,7 +54,7 @@ void BLEManager::setup()
     if (_enableBLE)
     {
         // Set system information (must not be changed after setup)
-        SysManagerIF* pSysManager = getSysManager();
+        SysManager* pSysManager = getSysManager();
         if (pSysManager)
         {
             bool isValid = false;

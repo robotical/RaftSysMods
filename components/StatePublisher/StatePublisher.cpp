@@ -86,39 +86,77 @@ void StatePublisher::loop()
     // Iterate through active subscriptions
     for (Subscription& sub : _subscriptions)
     {
+        uint32_t nowMs = millis();
 
         // Calculate effective check interval based on trigger type and connection state
         uint32_t checkInterval = sub._minTimeBetweenMsgsMs;
-        
-        if (sub._trigger == TRIGGER_ON_TIME_INTERVALS || 
-            sub._trigger == TRIGGER_ON_TIME_OR_CHANGE)
+        const char* intervalReason = "min";
+
+        switch (sub._trigger)
         {
-            // Use the rate-based interval for time-based triggers
-            if (sub._betweenPubsMs > 0)
-                checkInterval = sub._betweenPubsMs;
+            case TRIGGER_ON_TIME_INTERVALS:
+                // Time-only trigger uses the rate interval
+                if (sub._betweenPubsMs > 0)
+                {
+                    checkInterval = sub._betweenPubsMs;
+                    intervalReason = "rate";
+                }
+                break;
+            case TRIGGER_ON_STATE_CHANGE:
+            case TRIGGER_ON_TIME_OR_CHANGE:
+                // Change-driven triggers check frequently; time-based publish is handled separately
+                checkInterval = sub._minTimeBetweenMsgsMs;
+                intervalReason = "change";
+                break;
+            default:
+                break;
         }
         
         // Apply backoff if connection has issues
         if (sub._connState != Subscription::CONN_STATE_ACTIVE)
         {
             checkInterval = sub._backoffIntervalMs;
+            intervalReason = "backoff";
         }
         else if (reducePublishingRate)
         {
             checkInterval = REDUCED_PUB_RATE_WHEN_BUSY_MS;
+            intervalReason = "busy";
         }
 
         // Check if it's time to check/publish
-        if (!Raft::isTimeout(millis(), sub._lastCheckMs, checkInterval) && !sub._isPending)
+        bool timedOut = Raft::isTimeout(nowMs, sub._lastCheckMs, checkInterval);
+        if (!timedOut && !sub._isPending)
+        {
+            if (Raft::isTimeout(nowMs, sub._debugLastIntervalLogMs, 1000))
+            {
+                LOG_I(MODULE_PREFIX,
+                        "loop gate topic %s channelID %d trig %d intervalMs %u reason %s sinceLast %u sincePub %u pubEvery %u pending %d conn %d busy %d",
+                        sub._pubTopic.c_str(),
+                        sub._channelID,
+                        sub._trigger,
+                        checkInterval,
+                        intervalReason,
+                        nowMs - sub._lastCheckMs,
+                        nowMs - sub._lastPublishMs,
+                        sub._betweenPubsMs,
+                        sub._isPending ? 1 : 0,
+                        sub._connState,
+                        reducePublishingRate ? 1 : 0);
+                sub._debugLastIntervalLogMs = nowMs;
+            }
             continue;
+        }
 
         // Update check time
-        sub._lastCheckMs = millis();
+        sub._lastCheckMs = nowMs;
 
         // Check state if we have a state detect function
         bool stateChanged = false;
         std::vector<uint8_t> currentHash;
-        if (sub._stateDetectFn)
+        bool needStateCheck = (sub._trigger == TRIGGER_ON_STATE_CHANGE) ||
+                (sub._trigger == TRIGGER_ON_TIME_OR_CHANGE);
+        if (needStateCheck && sub._stateDetectFn)
         {
 #ifdef DEBUG_STATEPUB_OUTPUT_PUBLISH_STATS
             uint64_t startUs = micros();
@@ -158,19 +196,25 @@ void StatePublisher::loop()
         }
 
         // Determine if we should publish based on trigger type
+        bool minPublishElapsed = Raft::isTimeout(nowMs, sub._lastPublishMs, sub._minTimeBetweenMsgsMs);
+        bool timeElapsed = (sub._betweenPubsMs > 0) &&
+                Raft::isTimeout(nowMs, sub._lastPublishMs, sub._betweenPubsMs);
         bool shouldPublish = false;
         switch (sub._trigger)
         {
             case TRIGGER_ON_TIME_INTERVALS:
-                shouldPublish = true;  // Time interval elapsed
+                shouldPublish = timeElapsed && minPublishElapsed;
 #ifdef DEBUG_PUBLISHING_REASON
-                LOG_I(MODULE_PREFIX, "loop publish due to timeout for topic %s channelID %d", 
-                      sub._pubTopic.c_str(), sub._channelID);
+                if (shouldPublish)
+                {
+                    LOG_I(MODULE_PREFIX, "loop publish due to timeout for topic %s channelID %d", 
+                          sub._pubTopic.c_str(), sub._channelID);
+                }
 #endif
                 break;
                 
             case TRIGGER_ON_STATE_CHANGE:
-                shouldPublish = stateChanged;
+                shouldPublish = stateChanged && minPublishElapsed;
 #ifdef DEBUG_PUBLISHING_REASON
                 if (shouldPublish)
                 {
@@ -181,14 +225,14 @@ void StatePublisher::loop()
                 break;
                 
             case TRIGGER_ON_TIME_OR_CHANGE:
-                shouldPublish = true;  // Either time OR change (we already checked time)
+                shouldPublish = (stateChanged || timeElapsed) && minPublishElapsed;
 #ifdef DEBUG_PUBLISHING_REASON
-                if (stateChanged)
+                if (shouldPublish && stateChanged)
                 {
                     LOG_I(MODULE_PREFIX, "loop publish due to state change for topic %s channelID %d", 
                           sub._pubTopic.c_str(), sub._channelID);
                 }
-                else
+                else if (shouldPublish)
                 {
                     LOG_I(MODULE_PREFIX, "loop publish due to timeout for topic %s channelID %d", 
                           sub._pubTopic.c_str(), sub._channelID);
@@ -620,6 +664,7 @@ bool StatePublisher::attemptPublish(Subscription& sub)
         // Success!
         sub._isPending = false;
         sub._consecutiveFailures = 0;
+        sub._lastPublishMs = millis();
         
         // Restore to active state if we were in backoff
         if (sub._connState != Subscription::CONN_STATE_ACTIVE)

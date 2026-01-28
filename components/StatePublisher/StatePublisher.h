@@ -119,6 +119,7 @@ private:
         uint32_t _betweenPubsMs = 0;                // Calculated from rateHz
         uint32_t _minTimeBetweenMsgsMs = DEFAULT_MIN_TIME_BETWEEN_MSGS_MS; // Minimum interval between messages
         uint32_t _lastCheckMs = 0;                  // Last time we checked/attempted publish
+        uint32_t _lastPublishMs = 0;                // Last successful publish time
         bool _isPending = false;                    // Publish is due but not sent yet
 
         // Callbacks (copied from PubSource for performance - avoids lookup in loop)
@@ -140,6 +141,7 @@ private:
         ConnState _connState = CONN_STATE_ACTIVE;
         uint32_t _backoffIntervalMs = 0;            // Current backoff interval
         uint32_t _consecutiveFailures = 0;          // Count failures for backoff logic
+        uint32_t _debugLastIntervalLogMs = 0;       // Throttle gating logs per subscription
     };
 
     // Publication sources (from config, never changes after setup and registerDataSource)
